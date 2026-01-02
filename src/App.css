@@ -30,8 +30,8 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 1.25rem;
-  /* Compact padding */
+  padding: 1rem;
+  padding-top: 2.5rem; /* Space for traffic lights */
   max-width: 100%;
 }
 

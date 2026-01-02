@@ -14,9 +14,11 @@
       {
         "title": "Tether",
         "width": 450,
-        "height": 700
+        "height": 700,
+        "transparent": true
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }
