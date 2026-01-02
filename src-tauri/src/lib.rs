@@ -2,9 +2,12 @@ use std::thread;
 use std::time::Duration;
 use sysinfo::Disks;
 use tauri::{Emitter, Manager};
-use serde::Serialize;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use serde::{Deserialize, Serialize};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
+use std::fs;
 use std::sync::Mutex;
 use std::sync::Arc;
 
@@ -15,6 +18,23 @@ struct DriveInfo {
     total_space: u64,
     available_space: u64,
     is_removable: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct AppConfig {
+    ignored_extensions: Vec<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            ignored_extensions: vec![
+                "plist".into(), "log".into(), "db".into(), "ldb".into(), 
+                "lock".into(), "tmp".into(), "temp".into(), "crdownload".into(), 
+                "part".into(), "ini".into(), "dat".into(), "shm".into(), "wal".into()
+            ],
+        }
+    }
 }
 
 #[tauri::command]
@@ -35,6 +55,28 @@ fn get_drives() -> Vec<DriveInfo> {
 struct AppState {
     watcher: Mutex<Option<RecommendedWatcher>>,
     backup_path: Mutex<Option<String>>,
+    config: Mutex<AppConfig>,
+}
+
+#[tauri::command]
+fn get_config(state: tauri::State<AppState>) -> AppConfig {
+    state.config.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn save_config(config: AppConfig, state: tauri::State<AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
+    *state.config.lock().unwrap() = config.clone();
+    
+    // Persist to disk
+    let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    if !app_dir.exists() {
+        let _ = fs::create_dir_all(&app_dir);
+    }
+    let config_path = app_dir.join("tether_config.json");
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(config_path, json).map_err(|e| e.to_string())?;
+    
+    Ok(())
 }
 
 #[tauri::command]
@@ -78,6 +120,7 @@ fn start_watching(path: String, app_handle: tauri::AppHandle) -> Result<(), Stri
                              // Auto-Sync Logic
                              let state = handle.state::<AppState>();
                              let backup_path_guard = state.backup_path.lock().unwrap();
+                             let config_guard = state.config.lock().unwrap(); // Lock config
                              
                              if let Some(ref dest_root) = *backup_path_guard {
                                  let backup_folder = Path::new(dest_root).join("Tether_Backups");
@@ -98,12 +141,11 @@ fn start_watching(path: String, app_handle: tauri::AppHandle) -> Result<(), Stri
                                          continue;
                                      }
                                      
-                                     // Filter out noisy extensions
+                                     // Filter out ignored extensions from CONFIG
                                      if let Some(ext) = path.extension() {
                                          let ext_str = ext.to_string_lossy().to_lowercase();
-                                         let ignored_extensions = ["plist", "log", "db", "ldb", "lock", "tmp", "temp", "crdownload", "part", "ini", "dat", "shm", "wal"];
-                                         if ignored_extensions.contains(&ext_str.as_str()) {
-                                             continue;
+                                         if config_guard.ignored_extensions.iter().any(|e| e.to_lowercase() == ext_str) {
+                                            continue;
                                          }
                                      }
 
@@ -161,11 +203,53 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState { 
             watcher: Mutex::new(None),
-            backup_path: Mutex::new(None) 
+            backup_path: Mutex::new(None),
+            config: Mutex::new(AppConfig::default()), 
         })
-        .invoke_handler(tauri::generate_handler![get_drives, start_watching, set_backup_path])
+        .invoke_handler(tauri::generate_handler![get_drives, start_watching, set_backup_path, get_config, save_config])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                window.hide().unwrap();
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Load Config
+            let app_dir = app.path().app_data_dir().unwrap();
+            let config_path = app_dir.join("tether_config.json");
+            if config_path.exists() {
+               if let Ok(content) = fs::read_to_string(config_path) {
+                   if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+                       let state = app.state::<AppState>();
+                       *state.config.lock().unwrap() = config;
+                   }
+               }
+            }
+
+            // System Tray Setup
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).unwrap();
+            let show_i = MenuItem::with_id(app, "show", "Show Tether", true, None::<&str>).unwrap();
+            let menu = Menu::with_items(app, &[&show_i, &quit_i]).unwrap();
+
+            let _tray = TrayIconBuilder::with_id("tray")
+                .menu(&menu)
+                .icon(app.default_window_icon().unwrap().clone())
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "quit" => app.exit(0),
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app);
             
             // Spawn a background thread to monitor drives
             thread::spawn(move || {

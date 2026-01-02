@@ -29,9 +29,45 @@ function App() {
     setLogs((prev) => [{ timestamp: time, message: msg }, ...prev]);
   };
 
+  const loadConfig = async () => {
+    try {
+      const c = await invoke<{ ignored_extensions: string[] }>("get_config");
+      setConfig(c);
+    } catch (e) {
+      console.error(e);
+      addLog(`Error loading config: ${e}`);
+    }
+  };
+
+  const saveConfig = async (newConfig: { ignored_extensions: string[] }) => {
+    try {
+      await invoke("save_config", { config: newConfig });
+      setConfig(newConfig);
+      addLog("Settings updated.");
+    } catch (e) {
+      addLog(`Error saving settings: ${e}`);
+    }
+  };
+
+  const addExtension = () => {
+    if (!newExt) return;
+    const clean = newExt.trim().toLowerCase().replace(/^\./, ""); // remove leading dot
+    if (config.ignored_extensions.includes(clean)) return;
+
+    const updated = { ...config, ignored_extensions: [...config.ignored_extensions, clean] };
+    saveConfig(updated);
+    setNewExt("");
+  };
+
+  const removeExtension = (ext: string) => {
+    const updated = { ...config, ignored_extensions: config.ignored_extensions.filter(e => e !== ext) };
+    saveConfig(updated);
+  };
+
   useEffect(() => {
     // Initial fetch
     invoke<DriveInfo[]>("get_drives").then(setDrives);
+    loadConfig();
 
     // Listeners
     const unlistenDrives = listen<DriveInfo[]>("drives-changed", (event) => {
@@ -40,12 +76,12 @@ function App() {
     });
 
     const unlistenSync = listen<string>("file-synced", (event) => {
-      addLog(` synced: ${event.payload}`);
+      addLog(`Synced: ${event.payload}`);
     });
 
-    const unlistenChange = listen<string[]>("file-changed", (_event) => {
+    const unlistenChange = listen<string[]>("file-changed", (event) => {
       // Optional: Log detected changes before sync
-      // addLog(`detected change in: ${event.payload}`);
+      addLog(`Detected changes: ${event.payload.length} files`);
     });
 
     return () => {
